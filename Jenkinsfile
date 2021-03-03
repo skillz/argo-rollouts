@@ -8,7 +8,7 @@ switch(env.BRANCH_NAME) {
   case 'skillz-master': buildImage()
   break
   case ~/fix-premature-canary-svc-labels-v0.10.2/: buildImage()
-  bre
+  break
 
 }
 
