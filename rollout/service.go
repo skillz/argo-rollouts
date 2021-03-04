@@ -128,7 +128,7 @@ func (c *rolloutContext) reconcileStableAndCanaryService() error {
 	if c.rollout.Spec.Strategy.Canary == nil {
 		return nil
 	}
-	if c.newRS.Status.ReadyReplicas == 0 {
+	if c.newRS == nil || c.newRS.Status.ReadyReplicas == 0 || *c.newRS.Spec.Replicas < c.newRS.Status.ReadyReplicas {
 		return nil
 	}
 	if c.rollout.Spec.Strategy.Canary.StableService != "" && c.stableRS != nil {
