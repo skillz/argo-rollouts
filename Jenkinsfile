@@ -7,6 +7,8 @@ switch(env.BRANCH_NAME) {
   break
   case 'skillz-master': buildImage()
   break
+  case 'master': buildImage()
+  break
 }
 
 def buildImage() {
