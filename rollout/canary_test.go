@@ -8,11 +8,13 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	v1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	k8sinformers "k8s.io/client-go/informers"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/kubernetes/pkg/controller"
 	"k8s.io/utils/pointer"
@@ -1079,6 +1081,100 @@ func TestCanaryRolloutWithInvalidCanaryServiceName(t *testing.T) {
 	assert.True(t, ok)
 	assert.Equal(t, conditions.InvalidSpecReason, condition["reason"])
 	assert.Equal(t, "The Rollout \"foo\" is invalid: spec.strategy.canary.canaryService: Invalid value: \"invalid-canary\": service \"invalid-canary\" not found", condition["message"])
+}
+
+func TestCanarySVCSelectors(t *testing.T) {
+	for _, tc := range []struct {
+		canaryReplicas      int32
+		canaryReadyReplicas int32
+
+		shouldTargetNewRS bool
+	}{
+		{0, 0, false},
+		{2, 0, false},
+		{2, 1, false},
+		{2, 2, true},
+	} {
+		namespace := "namespace"
+		selectorNewRSVal := "new-rs-xxx"
+		stableService := &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "stable",
+				Namespace: namespace,
+			},
+		}
+		canaryService := &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "canary",
+				Namespace: namespace,
+			},
+		}
+		kubeclient := k8sfake.NewSimpleClientset(stableService, canaryService)
+		informers := k8sinformers.NewSharedInformerFactory(kubeclient, 0)
+		servicesLister := informers.Core().V1().Services().Lister()
+
+		rollout := &v1alpha1.Rollout{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "selector-labels-test",
+				Namespace: namespace,
+			},
+			Spec: v1alpha1.RolloutSpec{
+				Strategy: v1alpha1.RolloutStrategy{
+					Canary: &v1alpha1.CanaryStrategy{
+						StableService: stableService.Name,
+						CanaryService: canaryService.Name,
+					},
+				},
+			},
+		}
+		rc := rolloutContext{
+			log: logutil.WithRollout(rollout),
+			reconcilerBase: reconcilerBase{
+				servicesLister: servicesLister,
+				kubeclientset:  kubeclient,
+				recorder:       &FakeEventRecorder{},
+			},
+			rollout: rollout,
+			newRS: &v1.ReplicaSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "canary",
+					Namespace: namespace,
+					Labels: map[string]string{
+						v1alpha1.DefaultRolloutUniqueLabelKey: selectorNewRSVal,
+					},
+				},
+				Spec: v1.ReplicaSetSpec{
+					Replicas: pointer.Int32Ptr(tc.canaryReplicas),
+				},
+				Status: v1.ReplicaSetStatus{
+					ReadyReplicas: tc.canaryReadyReplicas,
+				},
+			},
+			stableRS: &v1.ReplicaSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "stable",
+					Namespace: namespace,
+				},
+			},
+		}
+		stopchan := make(chan struct{})
+		defer close(stopchan)
+		informers.Start(stopchan)
+		informers.WaitForCacheSync(stopchan)
+		err := rc.reconcileStableAndCanaryService()
+		assert.NoError(t, err, "unable to reconcileStableAndCanaryService")
+		updatedCanarySVC, err := servicesLister.Services(rc.rollout.Namespace).Get(canaryService.Name)
+		assert.NoError(t, err, "unable to get updated canary service")
+		if tc.shouldTargetNewRS {
+			assert.Equal(t, selectorNewRSVal, updatedCanarySVC.Spec.Selector[v1alpha1.DefaultRolloutUniqueLabelKey],
+				"canary SVC should have newRS selector label when newRS has %d replicas and %d ReadyReplicas",
+				tc.canaryReplicas, tc.canaryReadyReplicas)
+		} else {
+			assert.Empty(t, updatedCanarySVC.Spec.Selector[v1alpha1.DefaultRolloutUniqueLabelKey],
+				"canary SVC should not have newRS selector label when newRS has %d replicas and %d ReadyReplicas",
+				tc.canaryReplicas, tc.canaryReadyReplicas)
+		}
+	}
 }
 
 func TestCanaryRolloutWithStableService(t *testing.T) {
